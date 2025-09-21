@@ -1,4 +1,4 @@
-name: SAST - Semgrep (Kotlin/Spring)
+name: SAST - Semgrep (Kotlin/Spring) - OSS
 
 on:
   pull_request:
@@ -10,33 +10,30 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write   # para publicar SARIF na aba Security
-      pull-requests: write     # para anotar/comentar no PR quando aplicável
+      security-events: write
+      pull-requests: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Semgrep (OWASP + secrets + Java/Kotlin/Spring)
+      - name: Semgrep scan (OSS rules) -> SARIF
         uses: returntocorp/semgrep-action@v1
         with:
-          # Pacotes de regras públicos
-          config: >-
-            p/owasp-top-ten
-            p/secrets
-            p/java
-            p/kotlin
-            p/spring
-          generateSarif: "1"
-          sarif: "semgrep.sarif"
-          # Gate opcional: descomente para falhar PR com achados severos
-          # cliOptions: --error --severity=ERROR
-        env:
-          # Opcional: se você tiver conta no Semgrep Cloud
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+          entryPoint: scan
+          # Gere o SARIF diretamente
+          args: >-
+            --config p/owasp-top-ten
+            --config p/secrets
+            --config p/java
+            --config p/kotlin
+            --config p/spring
+            --sarif
+            --output semgrep.sarif
+            --metrics=off
+          # NÃO defina SEMGREP_APP_TOKEN aqui
 
       - name: Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
-
