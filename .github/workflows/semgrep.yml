@@ -1,36 +1,37 @@
 name: Semgrep
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
+  push:
+    branches: [main, master]
 
 jobs:
   semgrep:
-    name: Run Semgrep with auto-config
+    name: Run Semgrep CI
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
       security-events: write
+      actions: read
 
     steps:
       - name: Checkout do código
         uses: actions/checkout@v4
 
-      - name: Instalar Semgrep
+      - name: Instalar o Semgrep
         run: pip install semgrep
 
-      - name: Rodar Semgrep com auto-config e saída SARIF
-        run: semgrep scan --config=auto --sarif --output=semgrep.sarif
+      - name: Rodar Semgrep com config de segurança
+        run: semgrep scan --config=p/ci --sarif --output=semgrep.sarif
+
+      - name: Verificar conteúdo do SARIF (debug)
+        run: cat semgrep.sarif
 
       - name: Upload do resultado SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
-
 
 
 
