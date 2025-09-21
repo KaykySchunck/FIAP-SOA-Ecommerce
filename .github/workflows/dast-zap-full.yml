@@ -1,0 +1,65 @@
+name: DAST - OWASP ZAP Full Scan
+
+on:
+  workflow_dispatch:              # rodar manualmente
+  schedule:
+    - cron: "0 4 * * *"           # opcional: diariamente 04:00 UTC
+  # Se quiser rodar após o deploy de staging, use workflow_run:
+  # workflow_run:
+  #   workflows: ["Deploy Staging"]
+  #   types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  zap_full_scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ZAP Full Scan (spider + ajax-spider + active scan)
+      - name: ZAP Full Scan
+        id: zap
+        uses: zaproxy/action-full-scan@v0.12.0
+        with:
+          target: ${{ secrets.ZAP_TARGET_URL }}     # ex.: https://staging.suaapp.com
+          rules_file_name: ".zap/rules.tsv"         # opcional (tuning de ruído)
+          cmd_options: >-
+            -a                                      # inclui passive rules alpha
+            -m 5                                    # spider máx. 5 min (ajuste se quiser)
+            -r zap-full.html                        # gera HTML
+            -w zap-full.md                          # gera Markdown
+            -J zap-full.json                        # gera JSON (para gate)
+          allow_issue_writing: false                # true se quiser Issue automática
+          artifact_name: "zap_full_artifacts"
+
+        # (Opcional) Autenticação por header
+        env:
+          # ZAP_AUTH_HEADER: "Authorization"
+          # ZAP_AUTH_HEADER_VALUE: "Bearer ${{ secrets.STAGING_TOKEN }}"
+          # ZAP_AUTH_HEADER_SITE: ${{ secrets.ZAP_TARGET_URL }}
+          # Descomente se sua app exigir header de auth
+
+      # Gate: falha somente se houver alertas High no JSON
+      - name: Gate por severidade (High)
+        run: |
+          if [ ! -f zap-full.json ]; then
+            echo "zap-full.json não encontrado"; exit 1
+          fi
+          HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-full.json)
+          echo "High findings: $HIGHS"
+          test "$HIGHS" -gt 0 && exit 1 || exit 0
+
+      # Publicar relatórios como artefatos (consulta/rastreamento)
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-full-reports
+          path: |
+            zap-full.html
+            zap-full.md
+            zap-full.json
