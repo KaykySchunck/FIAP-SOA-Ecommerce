@@ -26,7 +26,7 @@ jobs:
         uses: returntocorp/semgrep-action@v1
         with:
           publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
-          args: semgrep --config=p/kotlin --config=p/springboot --config=p/security-audit --sarif --output=semgrep.sarif
+          args: --config=p/kotlin --config=p/springboot --config=p/security-audit --sarif --output=semgrep.sarif
 
       - name: Upload do resultado SARIF para GitHub Security
         uses: github/codeql-action/upload-sarif@v3
