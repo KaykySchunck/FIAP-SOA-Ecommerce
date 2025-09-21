@@ -8,7 +8,7 @@ on:
       - main
       - master
   schedule:
-    - cron: '28 7 * * *'  # executa toda quarta-feira às 04:28 (UTC)
+    - cron: '28 7 * * *'  # executa todo dia às 07:28 da manhã
 
 jobs:
   semgrep:
@@ -17,26 +17,24 @@ jobs:
 
     permissions:
       contents: read
-      security-events: write  # necessário para enviar o SARIF
+      security-events: write
       actions: read
 
     steps:
       - name: Checkout do código
         uses: actions/checkout@v4
 
-      - name: Instalar o Semgrep
-        run: pip install semgrep
+      - name: Run Semgrep com regras Kotlin, Spring e Security
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >
+            p/kotlin
+            p/springboot
+            p/security-audit
+          publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
+          generateSarif: true
 
-      - name: Rodar Semgrep com regras específicas para Kotlin e segurança
-        run: |
-          semgrep scan \
-            --config=p/kotlin \
-            --config=p/springboot \
-            --config=p/security-audit \
-            --sarif \
-            --output=semgrep.sarif
-
-      - name: Upload do resultado SARIF para GitHub Security
+      - name: Upload dos resultados para o GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
