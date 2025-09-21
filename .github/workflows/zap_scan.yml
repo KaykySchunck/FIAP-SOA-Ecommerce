@@ -1,0 +1,22 @@
+name: ZAP Baseline Scan
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  zap_scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repositório
+      uses: actions/checkout@v3
+
+    - name: Executar ZAP Baseline Scan
+      uses: zaproxy/action-baseline@v0.9.0
+      with:
+        target: 'http://localhost:8080'
+        docker_name: 'owasp/zap2docker-weekly'
+        fail_action: false
