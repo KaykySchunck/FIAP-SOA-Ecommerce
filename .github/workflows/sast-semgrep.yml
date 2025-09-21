@@ -1,4 +1,4 @@
-name: SAST - Semgrep (Kotlin/Spring)
+name: SAST - Semgrep (Cloud Policy)
 
 on:
   pull_request:
@@ -17,34 +17,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Semgrep scan (OSS rules) -> SARIF
+      # 1) Gera SARIF a partir da POLICY do Semgrep Cloud
+      #    (precisa do token para baixar a policy)
+      - name: Semgrep scan (policy -> SARIF)
         uses: returntocorp/semgrep-action@v1
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         with:
-          entryPoint: scan
+          entryPoint: semgrep
           args: >-
-            --config p/owasp-top-ten
-            --config p/secrets
-            --config p/java
-            --config p/kotlin
-            --config p/spring
+            scan
+            --config=policy
             --sarif
-            --output semgrep.sarif
+            --output=semgrep.sarif
             --metrics=off
-        # Importante: NÃO definir SEMGREP_APP_TOKEN aqui.
-        # (Se quiser usar Semgrep Cloud, fazemos outro YAML.)
 
       - name: Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
 
-      # Gate opcional por severidade (falha se houver "ERROR" no SARIF)
-      - name: Gate por severidade (ERROR)
-        run: |
-          if [ -f semgrep.sarif ]; then
-            ERRORS=$(jq '[.runs[].results[] | select(.level=="error")] | length' semgrep.sarif)
-            echo "Findings severidade ERROR: ${ERRORS}"
-            test "${ERRORS}" -gt 0 && exit 1 || exit 0
-          else
-            echo "semgrep.sarif não encontrado"; exit 1
-          fi
+      # 2) Aplica o gate da sua POLICY (bloqueia PR conforme severidade definida lá)
+      - name: Semgrep CI (enforce Cloud Policy)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          entryPoint: ci
+          publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
