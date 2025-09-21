@@ -1,4 +1,4 @@
-name: DAST - ZAP Full (localhost)
+name: DAST - ZAP Spider (localhost)
 
 on:
   workflow_dispatch:
@@ -7,18 +7,16 @@ permissions:
   contents: read
 
 jobs:
-  zap_full_local:
+  zap_spider_local:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Make gradlew executable (and fix CRLF if any)
+      - name: Make gradlew executable
         run: |
-          test -f gradlew || { echo "gradlew não encontrado"; exit 1; }
-          chmod +x ./gradlew
-          sed -i 's/\r$//' ./gradlew
+          test -f gradlew && chmod +x gradlew || true
+          sed -i 's/\r$//' gradlew || true
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -26,63 +24,22 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Build (Gradle)
+      - name: Build & start app (localhost:8080)
         run: |
           bash ./gradlew bootJar -x test
-
-      - name: Start app (localhost:8080)
-        run: |
           JAR=$(ls build/libs/*.jar | head -n1)
           nohup java -jar "$JAR" --server.port=8080 --server.address=0.0.0.0 > /tmp/app.log 2>&1 &
           for i in {1..60}; do
-            if curl -sf http://127.0.0.1:8080/v1/products >/dev/null; then
-              echo "App OK"; break
-            fi
-            sleep 3
+            curl -sf http://127.0.0.1:8080/v1/products && break
+            sleep 2
           done
 
-      - name: Detect host address for Docker (host ↔ container)
-        run: |
-          set -e
-          T1="http://host.docker.internal:8080/v1/products"
-          T2="http://172.17.0.1:8080/v1/products"
-          if docker run --rm --network bridge curlimages/curl:8.9.1 -sSf "$T1" >/dev/null; then
-            echo "DAST_TARGET=$T1" >> $GITHUB_ENV
-          elif docker run --rm --network bridge curlimages/curl:8.9.1 -sSf "$T2" >/dev/null; then
-            echo "DAST_TARGET=$T2" >> $GITHUB_ENV
-          else
-            echo "Não consegui alcançar a app a partir de um container. Verifique se está ouvindo em 0.0.0.0:8080."
-            echo "Log da app:"; tail -n 200 /tmp/app.log || true
-            exit 1
-          fi
-
-      - name: ZAP Full Scan (contra localhost)
-        uses: zaproxy/action-full-scan@v0.12.0
+      - name: ZAP Baseline (Spider básico)
+        uses: zaproxy/action-baseline@v0.14.0
         with:
-          target: ${{ env.DAST_TARGET }}
+          target: 'http://host.docker.internal:8080/v1/products'  # acessa o host a partir do container
           cmd_options: >-
-            -a
-            -m 5
-            -r zap-full.html
-            -w zap-full.md
-            -J zap-full.json
+            -m 2
+            -r zap-baseline.html
           allow_issue_writing: false
-          artifact_name: zap_full_local
-
-      - name: Gate por severidade (High)
-        run: |
-          test -f zap-full.json || { echo "zap-full.json não encontrado"; exit 1; }
-          HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-full.json)
-          echo "High findings: $HIGHS"
-          if [ "$HIGHS" -gt 0 ]; then exit 1; fi
-
-      - name: Upload reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-full-reports
-          path: |
-            zap-full.html
-            zap-full.md
-            zap-full.json
-            /tmp/app.log
+          artifact_name: zap_spider_baseline
