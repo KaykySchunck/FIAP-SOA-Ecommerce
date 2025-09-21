@@ -1,14 +1,13 @@
-name: semgrep
+name: Semgrep CI
 
 on:
-  workflow_dispatch: {}
-  pull_request: {}
   push:
-    branches:
-      - main
-      - master
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   schedule:
-    - cron: '28 7 * * *'  # executa todo dia às 07:28 da manhã
+    - cron: '28 7 * * *'
+  workflow_dispatch:
 
 jobs:
   semgrep:
@@ -18,23 +17,18 @@ jobs:
     permissions:
       contents: read
       security-events: write
-      actions: read
 
     steps:
       - name: Checkout do código
         uses: actions/checkout@v4
 
-      - name: Run Semgrep com regras Kotlin, Spring e Security
+      - name: Rodar Semgrep com CI + SARIF
         uses: returntocorp/semgrep-action@v1
         with:
-          config: >
-            p/kotlin
-            p/springboot
-            p/security-audit
           publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
-          generateSarif: true
+          args: --config=p/kotlin --config=p/springboot --config=p/security-audit --sarif --output=semgrep.sarif
 
-      - name: Upload dos resultados para o GitHub Security
+      - name: Upload do resultado SARIF para GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
