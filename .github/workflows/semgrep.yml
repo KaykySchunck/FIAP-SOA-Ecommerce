@@ -1,3 +1,5 @@
+name: Semgrep Kotlin Spring Scan
+
 on:
   workflow_dispatch: {}
   pull_request: {}
@@ -5,30 +7,30 @@ on:
     branches:
       - main
       - master
-    paths:
-      - .github/workflows/semgrep.yml
   schedule:
-    # Executa todo dia às 07:28 (UTC)
-    - cron: '28 7 * * *'
-
-name: Semgrep
+    - cron: '28 7 * * *'  # Executa diariamente às 07:28 UTC
 
 jobs:
   semgrep:
-    name: semgrep/ci
+    name: Run Semgrep scan for Kotlin/Spring
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
-      security-events: write  # necessário para subir resultados ao GitHub
+      security-events: write  # Necessário para publicar na aba "Code scanning alerts"
+
     env:
       SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-    container:
-      image: semgrep/semgrep
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Run Semgrep
-        run: semgrep ci --config=p/default --sarif --output=semgrep.sarif
+    container:
+      image: returntocorp/semgrep
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep with Kotlin + Spring Boot rules
+        run: semgrep ci --config=p/kotlin --config=p/spring-security --sarif --output=semgrep.sarif
 
       - name: Upload SARIF to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v3
