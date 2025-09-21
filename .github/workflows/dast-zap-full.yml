@@ -1,60 +1,77 @@
-name: DAST - OWASP ZAP Full Scan
+name: DAST - ZAP Full
 
 on:
-  workflow_dispatch:              # rodar manualmente
-  schedule:
-    - cron: "0 4 * * *"           # opcional: diariamente 04:00 UTC
-  # Se quiser rodar após o deploy de staging, use workflow_run:
-  # workflow_run:
-  #   workflows: ["Deploy Staging"]
-  #   types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  zap_full_scan:
+  zap_full_local:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ZAP Full Scan (spider + ajax-spider + active scan)
-      - name: ZAP Full Scan
-        id: zap
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build (Gradle)
+        run: |
+          ./gradlew --version || ./gradlew wrapper
+          ./gradlew bootJar -x test
+
+      - name: Start app (localhost:8080)
+        run: |
+          JAR=$(ls build/libs/*.jar | head -n1)
+          nohup java -jar "$JAR" --server.port=8080 --server.address=0.0.0.0 > /tmp/app.log 2>&1 &
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:8080/v1/products >/dev/null; then
+              echo "App OK"; break
+            fi
+            sleep 3
+          done
+
+      - name: Detect host address for Docker (host ↔ container)
+        run: |
+          set -e
+          T1="http://host.docker.internal:8080/v1/products"
+          T2="http://172.17.0.1:8080/v1/products"
+          if docker run --rm --network bridge curlimages/curl:8.9.1 -sSf "$T1" >/dev/null; then
+            echo "DAST_TARGET=$T1" >> $GITHUB_ENV
+          elif docker run --rm --network bridge curlimages/curl:8.9.1 -sSf "$T2" >/dev/null; then
+            echo "DAST_TARGET=$T2" >> $GITHUB_ENV
+          else
+            echo "Não consegui alcançar a app a partir de um container. Verifique se está ouvindo em 0.0.0.0:8080."; 
+            echo "Log da app:"; tail -n 200 /tmp/app.log || true
+            exit 1
+          fi
+
+      - name: ZAP Full Scan (contra localhost)
         uses: zaproxy/action-full-scan@v0.12.0
         with:
-          target: ${{ secrets.ZAP_TARGET_URL }}     # ex.: https://staging.suaapp.com
-          rules_file_name: ".zap/rules.tsv"         # opcional (tuning de ruído)
+          target: ${{ env.DAST_TARGET }}
           cmd_options: >-
-            -a                                      # inclui passive rules alpha
-            -m 5                                    # spider máx. 5 min (ajuste se quiser)
-            -r zap-full.html                        # gera HTML
-            -w zap-full.md                          # gera Markdown
-            -J zap-full.json                        # gera JSON (para gate)
-          allow_issue_writing: false                # true se quiser Issue automática
-          artifact_name: "zap_full_artifacts"
+            -a
+            -m 5
+            -r zap-full.html
+            -w zap-full.md
+            -J zap-full.json
+          allow_issue_writing: false
+          artifact_name: zap_full_local
 
-        # (Opcional) Autenticação por header
-        env:
-          # ZAP_AUTH_HEADER: "Authorization"
-          # ZAP_AUTH_HEADER_VALUE: "Bearer ${{ secrets.STAGING_TOKEN }}"
-          # ZAP_AUTH_HEADER_SITE: ${{ secrets.ZAP_TARGET_URL }}
-          # Descomente se sua app exigir header de auth
-
-      # Gate: falha somente se houver alertas High no JSON
       - name: Gate por severidade (High)
         run: |
-          if [ ! -f zap-full.json ]; then
-            echo "zap-full.json não encontrado"; exit 1
-          fi
+          test -f zap-full.json || { echo "zap-full.json não encontrado"; exit 1; }
           HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-full.json)
           echo "High findings: $HIGHS"
-          test "$HIGHS" -gt 0 && exit 1 || exit 0
+          if [ "$HIGHS" -gt 0 ]; then exit 1; fi
 
-      # Publicar relatórios como artefatos (consulta/rastreamento)
-      - name: Upload reports
+      - name: Upload reports + app log
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -63,3 +80,5 @@ jobs:
             zap-full.html
             zap-full.md
             zap-full.json
+            /tmp/app.log
+
