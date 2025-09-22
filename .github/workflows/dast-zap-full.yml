@@ -34,7 +34,7 @@ jobs:
         run: ./gradlew bootJar -x test
 
       - name: Create docker network
-        run: docker network create zapnet
+        run: docker network create zapnet || true
 
       - name: Start Postgres (zapnet)
         run: |
@@ -43,7 +43,7 @@ jobs:
             -e POSTGRES_PASSWORD=postgres \
             -e POSTGRES_DB=ecommerce \
             postgres:16
-          # aguarda DB ficar pronto
+          # Aguarda DB
           for i in {1..30}; do
             docker run --rm --network zapnet postgres:16 \
               pg_isready -h ecommerce_db -U postgres -d ecommerce && break || sleep 2
@@ -61,15 +61,23 @@ jobs:
             eclipse-temurin:21-jre \
             java -jar /app/$(basename "$JAR") \
               --server.port=8080 --server.address=0.0.0.0
-          # aguarda API responder (qualquer HTTP != 000)
+          # Aguarda API
           for i in {1..60}; do
             CODE=$(docker run --rm --network zapnet curlimages/curl:8.9.1 -s -o /dev/null -w "%{http_code}" http://app:8080/v1/products || echo 000)
             [ "$CODE" != "000" ] && echo "App up (HTTP $CODE)" && break || sleep 2
           done
 
+      # >>> FIX DE PERMISSÃO <<<
+      - name: Prepare writable folder for ZAP outputs
+        run: |
+          mkdir -p zap-out
+          chmod 777 zap-out
+
       - name: Run ZAP Full Scan (same docker network)
         run: |
-          docker run --rm --network zapnet -v "$PWD":/zap/wrk ghcr.io/zaproxy/zaproxy:stable \
+          docker run --rm --network zapnet \
+            -v "$PWD/zap-out":/zap/wrk \
+            ghcr.io/zaproxy/zaproxy:stable \
             zap-full-scan.py \
               -t http://app:8080/v1/products \
               -r /zap/wrk/zap-full.html \
@@ -81,8 +89,8 @@ jobs:
         run: |
           sudo apt-get update -y >/dev/null 2>&1 || true
           sudo apt-get install -y jq >/dev/null 2>&1 || true
-          test -f zap-full.json || { echo "zap-full.json não encontrado"; exit 1; }
-          HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-full.json)
+          test -f zap-out/zap-full.json || { echo "zap-out/zap-full.json não encontrado"; exit 1; }
+          HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-out/zap-full.json)
           echo "High findings: $HIGHS"
           if [ "$HIGHS" -gt 0 ]; then exit 1; fi
 
@@ -92,9 +100,9 @@ jobs:
         with:
           name: zap-full-reports
           path: |
-            zap-full.html
-            zap-full.md
-            zap-full.json
+            zap-out/zap-full.html
+            zap-out/zap-full.md
+            zap-out/zap-full.json
 
       - name: Cleanup
         if: always()
