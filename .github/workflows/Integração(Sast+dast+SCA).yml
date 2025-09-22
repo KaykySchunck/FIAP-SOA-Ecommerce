@@ -1,0 +1,244 @@
+name: Security CI (SAST + SCA + DAST)
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # para subir SARIF
+
+concurrency:
+  group: security-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 0) Build da app (gera JAR e publica como artifact)
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build (Gradle)
+        run: |
+          test -f gradlew && chmod +x gradlew || true
+          sed -i 's/\r$//' gradlew || true
+          ./gradlew bootJar -x test
+
+      - name: Upload app JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs/*.jar
+
+  # 1) SAST - Semgrep (gera SARIF + gate)
+  sast_semgrep:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # roda regras padrão de Java; gere SARIF p/ o Code Scanning
+      - name: Run Semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/java
+          generateSarif: true
+          sarifOutput: semgrep.sarif
+        continue-on-error: true   # vamos fazer o gate manualmente
+
+      - name: Upload SARIF (Semgrep)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Ensure jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
+
+      # Gate: falha se houver findings nível "error" (equivalente a High/Critical p/ Semgrep OSS)
+      - name: Gate SAST
+        run: |
+          ERR=$(jq '[.runs[].results[]? | select(.level=="error" or .properties.severity=="ERROR")] | length' semgrep.sarif)
+          echo "Semgrep errors: $ERR"
+          test "$ERR" -eq 0
+
+  # 2) SCA - Trivy (sem API key; SARIF + gate High/Critical)
+  sca_trivy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Trivy cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ hashFiles('**/*.gradle*','**/pom.xml','**/gradle.lockfile') }}
+          restore-keys: trivy-db-${{ runner.os }}-
+
+      - name: Run Trivy (SCA) -> JSON + SARIF
+        run: |
+          mkdir -p sca-reports
+          docker run --rm \
+            -v "$PWD":/src \
+            -v "$HOME/.cache/trivy":/root/.cache/ \
+            aquasecurity/trivy:latest fs /src \
+              --scanners vuln --ignore-unfixed \
+              --severity HIGH,CRITICAL \
+              --format json  --output /src/sca-reports/trivy.json   || true
+
+          docker run --rm \
+            -v "$PWD":/src \
+            -v "$HOME/.cache/trivy":/root/.cache/ \
+            aquasecurity/trivy:latest fs /src \
+              --scanners vuln --ignore-unfixed \
+              --severity HIGH,CRITICAL \
+              --format sarif --output /src/sca-reports/trivy.sarif || true
+
+      - name: Upload SARIF (Trivy)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: sca-reports/trivy.sarif
+
+      - name: Gate SCA (HIGH/CRITICAL)
+        run: |
+          COUNT=$(jq '[.runs[].results[]?] | length' sca-reports/trivy.sarif)
+          echo "SCA HIGH/CRITICAL: $COUNT"
+          test "$COUNT" -eq 0
+
+      - name: Upload artifacts (Trivy)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-trivy
+          path: sca-reports/*
+
+  # 3) DAST - ZAP Full no mesmo network (Postgres + app + ZAP)
+  dast_zap:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Docker network
+        run: docker network create zapnet || true
+
+      - name: Start Postgres (zapnet)
+        run: |
+          docker run -d --name db --network zapnet \
+            -e POSTGRES_DB=ecomm \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 5432:5432 \
+            postgres:16-alpine
+          for i in {1..30}; do
+            docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && break
+            sleep 2
+          done
+
+      - name: Download app JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: appjar
+
+      - name: Start app (container name: app)
+        run: |
+          JAR="$(ls appjar/*.jar | head -n1)"
+          docker run -d --name app --network zapnet -p 8080:8080 \
+            -v "$PWD/appjar":/work -w /work \
+            openjdk:21-jdk \
+            java -jar "$(basename "$JAR")" \
+              --server.port=8080 \
+              --server.address=0.0.0.0 \
+              --spring.datasource.url=jdbc:postgresql://db:5432/ecomm \
+              --spring.datasource.username=postgres \
+              --spring.datasource.password=postgres \
+              --spring.jpa.hibernate.ddl-auto=update
+
+      - name: Wait for health
+        run: |
+          for i in {1..60}; do
+            docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf http://app:8080/v1/products >/dev/null && { echo "App OK"; exit 0; }
+            sleep 3
+          done
+          echo "App não respondeu em /v1/products"; docker logs app || true; exit 1
+
+      - name: Prep output dir (writeable)
+        run: |
+          mkdir -p zap-out
+          chmod 777 zap-out
+
+      - name: Run ZAP Full Scan
+        run: |
+          docker run --rm --network zapnet \
+            -v "$PWD/zap-out":/zap/wrk \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py \
+              -t http://app:8080/v1/products \
+              -r /zap/wrk/zap-full.html \
+              -w /zap/wrk/zap-full.md \
+              -J /zap/wrk/zap-full.json \
+              -a -m 5 || true
+
+      - name: Ensure jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
+
+      # Gate: falha se houver High
+      - name: Gate DAST (High)
+        run: |
+          test -f zap-out/zap-full.json || { echo "zap-out/zap-full.json não encontrado"; exit 1; }
+          HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-out/zap-full.json)
+          echo "ZAP High findings: $HIGHS"
+          test "$HIGHS" -eq 0
+
+      - name: Upload reports (ZAP)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-full-reports
+          path: zap-out/*
+
+      - name: Cleanup (containers/network)
+        if: always()
+        run: |
+          docker logs app --since 30m || true
+          docker rm -f app db || true
+          docker network rm zapnet || true
+
+  # 4) Deploy gate (só roda se tudo passar)
+  ready_to_deploy:
+    needs: [sast_semgrep, sca_trivy, dast_zap]
+    if: ${{ success() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "✅ Todos os gates passaram. Pronto para deploy."
+
+  # 5) Notificações Slack (falha)
+  notify_failure:
+    needs: [sast_semgrep, sca_trivy, dast_zap]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack (failure)
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_COLOR: '#D2222D'
+          SLACK_TITLE: "❌ Security CI falhou"
+          SLACK_MESSAGE: |
+            Repo: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Run: ${{ github.run_number }}
+            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
