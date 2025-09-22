@@ -1,4 +1,4 @@
-name: DAST - ZAP Full (docker-net)
+name: DAST - ZAP Full (same docker network)
 
 on:
   workflow_dispatch:
@@ -7,74 +7,78 @@ permissions:
   contents: read
 
 jobs:
-  zap_full:
+  dast_zap:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup JDK 21
+      - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Gradle cache
-        uses: gradle/gradle-build-action@v3
-
-      - name: Ensure Gradle wrapper + chmod
+      - name: Make gradlew executable (and fix CRLF if any)
         run: |
-          [ -f ./gradlew ] || gradle wrapper
-          sed -i 's/\r$//' ./gradlew || true
+          test -f gradlew || { echo "gradlew não encontrado"; exit 1; }
           chmod +x ./gradlew
-          ./gradlew --version
+          sed -i 's/\r$//' ./gradlew
 
-      - name: Build JAR
+      - name: Build (Gradle)
         run: ./gradlew bootJar -x test
 
-      - name: Create docker network
+      - name: Create Docker network
         run: docker network create zapnet || true
 
       - name: Start Postgres (zapnet)
         run: |
-          docker run -d --name ecommerce_db --network zapnet \
+          docker run -d --name db --network zapnet \
+            -e POSTGRES_DB=ecomm \
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres \
-            -e POSTGRES_DB=ecommerce \
-            postgres:16
-          # Aguarda DB
+            -p 5432:5432 \
+            postgres:16-alpine
+          # Espera DB ficar pronto
           for i in {1..30}; do
-            docker run --rm --network zapnet postgres:16 \
-              pg_isready -h ecommerce_db -U postgres -d ecommerce && break || sleep 2
+            docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && break
+            sleep 2
           done
 
-      - name: Start app container (zapnet)
+      - name: Start app (container name: app)
         run: |
-          JAR=$(ls build/libs/*.jar | head -n1)
-          docker run -d --name app --network zapnet \
-            -e SPRING_DATASOURCE_URL=jdbc:postgresql://ecommerce_db:5432/ecommerce \
-            -e SPRING_DATASOURCE_USERNAME=postgres \
-            -e SPRING_DATASOURCE_PASSWORD=postgres \
-            -e SPRING_JPA_HIBERNATE_DDL_AUTO=update \
-            -v "$PWD/build/libs":/app:ro \
-            eclipse-temurin:21-jre \
-            java -jar /app/$(basename "$JAR") \
-              --server.port=8080 --server.address=0.0.0.0
-          # Aguarda API
-          for i in {1..60}; do
-            CODE=$(docker run --rm --network zapnet curlimages/curl:8.9.1 -s -o /dev/null -w "%{http_code}" http://app:8080/v1/products || echo 000)
-            [ "$CODE" != "000" ] && echo "App up (HTTP $CODE)" && break || sleep 2
-          done
+          JAR="$(ls build/libs/*.jar | head -n1)"
+          echo "Usando JAR: $JAR"
+          docker run -d --name app --network zapnet -p 8080:8080 \
+            -v "$PWD":/work -w /work \
+            openjdk:21-jdk \
+            java -jar "$JAR" \
+              --server.port=8080 \
+              --server.address=0.0.0.0 \
+              --spring.datasource.url=jdbc:postgresql://db:5432/ecomm \
+              --spring.datasource.username=postgres \
+              --spring.datasource.password=postgres \
+              --spring.jpa.hibernate.ddl-auto=update
 
-      # >>> FIX DE PERMISSÃO <<<
-      - name: Prepare writable folder for ZAP outputs
+      - name: Wait for health (http://app:8080/v1/products)
+        run: |
+          for i in {1..60}; do
+            docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf http://app:8080/v1/products >/dev/null && { echo "App OK"; exit 0; }
+            sleep 3
+          done
+          echo "App não respondeu em /v1/products"
+          docker logs app || true
+          exit 1
+
+      - name: Prep output dir (writeable)
         run: |
           mkdir -p zap-out
           chmod 777 zap-out
 
       - name: Run ZAP Full Scan (same docker network)
         run: |
+          # Não falhe aqui; deixe o gate decidir
           docker run --rm --network zapnet \
             -v "$PWD/zap-out":/zap/wrk \
             ghcr.io/zaproxy/zaproxy:stable \
@@ -83,16 +87,23 @@ jobs:
               -r /zap/wrk/zap-full.html \
               -w /zap/wrk/zap-full.md \
               -J /zap/wrk/zap-full.json \
-              -a -m 5
+              -a -m 5 || true
+
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
 
       - name: Gate por severidade (High)
         run: |
-          sudo apt-get update -y >/dev/null 2>&1 || true
-          sudo apt-get install -y jq >/dev/null 2>&1 || true
           test -f zap-out/zap-full.json || { echo "zap-out/zap-full.json não encontrado"; exit 1; }
           HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-out/zap-full.json)
           echo "High findings: $HIGHS"
-          if [ "$HIGHS" -gt 0 ]; then exit 1; fi
+          if [ "$HIGHS" -gt 0 ]; then
+            echo "Falhando pipeline por findings High."
+            exit 1
+          fi
 
       - name: Upload reports
         if: always()
@@ -107,9 +118,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          echo "---- app logs (últimas 200 linhas) ----" || true
-          docker logs app --tail 200 || true
-          docker rm -f app ecommerce_db || true
+          docker logs app --since 30m || true
+          docker rm -f app db || true
           docker network rm zapnet || true
-
 
