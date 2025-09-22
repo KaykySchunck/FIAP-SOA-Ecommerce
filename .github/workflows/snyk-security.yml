@@ -6,12 +6,12 @@ on:
   pull_request:
     branches: ["main"]
   schedule:
-    - cron: "15 4 * * 4" # semanal (qui 04:15 UTC)
+    - cron: "15 4 * * 4"
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write  # pra subir SARIF
+  security-events: write
 
 jobs:
   snyk-sca:
@@ -21,74 +21,76 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Java p/ Gradle resolver deps
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      # Snyk CLI
-      - name: Setup Snyk
+      - name: Setup Snyk CLI
         uses: snyk/actions/setup@v4
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # Se o Snyk precisar invocar ./gradlew p/ coletar a árvore de deps
-      - name: Make gradlew executable (and fix CRLF if any)
+      - name: Make gradlew executable (if present)
         run: |
           if [ -f gradlew ]; then
             chmod +x ./gradlew
             sed -i 's/\r$//' ./gradlew
           fi
 
-      # Varre TODOS os manifests do repo (Gradle/Maven/Node/etc), gera SARIF
-      - name: Snyk test (gera SARIF)
+      # Gera SARIF p/ Code Scanning (falhas só no gate abaixo)
+      - name: Snyk test (SARIF)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          # SARIF p/ Code Scanning
           snyk test \
             --all-projects \
             --detection-depth=4 \
             --severity-threshold=high \
             --sarif-file-output=snyk.sarif || true
 
-          # JSON p/ gate de severidade
+      # Gera JSON pra gate de severidade
+      - name: Snyk test (JSON p/ gate)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
           snyk test \
             --all-projects \
             --detection-depth=4 \
             --severity-threshold=low \
             --json-file-output=snyk.json || true
 
-      - name: Upload SARIF to Code Scanning
+      - name: Upload SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk.sarif
 
-      # Gate: falha só se tiver High/Critical
-      - name: Ensure jq is available
+      - name: Ensure jq
         run: |
           if ! command -v jq >/dev/null; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
+
       - name: Gate por severidade (High/Critical)
         run: |
           test -f snyk.json || { echo "snyk.json não encontrado"; exit 1; }
           HIGHS=$(jq '[.vulnerabilities[] | select(.severity=="high" or .severity=="critical")] | length' snyk.json)
-          echo "High/Critical encontrados: $HIGHS"
+          echo "High/Critical: $HIGHS"
           if [ "$HIGHS" -gt 0 ]; then
-            echo "Falhando pipeline por High/Critical."
+            echo "Falhando por High/Critical."
             exit 1
           fi
 
-      # Snapshot no Snyk (apenas na main) pra histórico/alertas na UI
+      # Snapshot na UI do Snyk (somente main)
       - name: Snyk monitor (main only)
         if: github.ref == 'refs/heads/main'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           snyk monitor --all-projects --detection-depth=4 \
-            --project-environment=github-actions --project-lifecycle=production || true
+            --project-environment=github-actions \
+            --project-lifecycle=production || true
+
 
