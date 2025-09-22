@@ -53,7 +53,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Use sua conta do Semgrep (se tiver token). Sem token também funciona.
       - name: Semgrep scan
         id: semgrep
         uses: returntocorp/semgrep-action@fcd5ab7459e8d91cb1777481980d1b18b4fc6735
@@ -231,13 +230,14 @@ jobs:
     steps:
       - run: echo "✅ Todos os gates passaram. Pronto para deploy."
 
-  # 5) Notificação no Slack quando falhar (opcional)
+  # 5) Notificação no Slack quando falhar
   notify_failure:
     needs: [sast_semgrep, sca_odc, dast_zap]
-    if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+    if: ${{ failure() }}   # <- só condição de falha aqui
     runs-on: ubuntu-latest
     steps:
       - name: Slack (failure)
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}   # <- checagem do secret no STEP
         uses: rtCamp/action-slack-notify@v2
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -248,5 +248,6 @@ jobs:
             Workflow: ${{ github.workflow }}
             Run: ${{ github.run_number }}
             Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
 
 
