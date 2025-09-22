@@ -15,18 +15,17 @@ jobs:
   odc:
     runs-on: ubuntu-latest
     env:
-      # ajusta o gate (7.0 = High e Critical falham o job)
-      DC_FAIL_ON_CVSS: "7.0"
+      DC_FAIL_ON_CVSS: "7.0" # falha com High/Critical
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Cache do banco da NVD para acelerar os próximos runs
+      # ✅ FIX: usar ${{ }} no hashFiles
       - name: Restore ODC data cache
         uses: actions/cache@v4
         with:
           path: ./.odc-data
-          key: odc-data-v11-${{ runner.os }}-{{hashFiles('**/build.gradle*','**/pom.xml','**/package-lock.json','**/gradle.lockfile','**/gradle/**')}}
+          key: odc-data-v11-${{ runner.os }}-${{ hashFiles('**/build.gradle*','**/pom.xml','**/package-lock.json','**/gradle.lockfile','**/gradle/**') }}
           restore-keys: |
             odc-data-v11-${{ runner.os }}-
 
@@ -39,13 +38,13 @@ jobs:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           docker pull owasp/dependency-check:latest
-          # Se tiver arquivo de supressão, usamos. (opcional)
+
           SUPP=""
           if [ -f security/dependency-check-suppression.xml ]; then
             SUPP="--suppression /src/security/dependency-check-suppression.xml"
           fi
 
-          # Executa o scan no repo; grava relatórios em odc-reports (HTML/JSON/SARIF)
+          # roda como o mesmo UID/GID p/ evitar permissão  (gera HTML/JSON/SARIF)
           docker run --rm \
             -u "$(id -u):$(id -g)" \
             -e NVD_API_KEY="$NVD_API_KEY" \
@@ -56,18 +55,20 @@ jobs:
             --scan /src \
             --project "${{ github.repository }}@${{ github.sha }}" \
             --out /report \
-            --format "ALL" \
+            --format HTML --format JSON --format SARIF \
             --failOnCVSS "${DC_FAIL_ON_CVSS}" $SUPP || true
 
-      # Publica no Code Scanning (Security > Code scanning alerts)
+          echo "Arquivos gerados:"
+          ls -lah odc-reports || true
+
+      # ✅ Só faz upload se o SARIF existir
       - name: Upload SARIF para o GitHub
-        if: always()
+        if: always() && hashFiles('odc-reports/dependency-check-report.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: odc-reports/dependency-check-report.sarif
           category: owasp-dependency-check
 
-      # Também guarda os relatórios como artifact
       - name: Upload artifacts (HTML/JSON/SARIF)
         if: always()
         uses: actions/upload-artifact@v4
@@ -77,3 +78,4 @@ jobs:
             odc-reports/dependency-check-report.html
             odc-reports/dependency-check-report.json
             odc-reports/dependency-check-report.sarif
+          if-no-files-found: warn
