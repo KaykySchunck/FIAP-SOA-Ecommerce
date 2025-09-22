@@ -10,6 +10,18 @@ jobs:
   zap_full_local:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecommerce
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres -d ecommerce"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,34 +32,38 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # Garante o Gradle CLI disponível (para gerar wrapper se faltar)
       - name: Prepare Gradle
         uses: gradle/gradle-build-action@v3
 
-      # Gera o wrapper se não existir e aplica permissão de execução
       - name: Ensure Gradle wrapper + chmod
         run: |
-          if [ ! -f ./gradlew ]; then
-            echo "gradlew não existe — gerando com 'gradle wrapper'"
-            gradle wrapper
-          fi
+          [ -f ./gradlew ] || gradle wrapper
           sed -i 's/\r$//' ./gradlew || true
           chmod +x ./gradlew
           ./gradlew --version
 
       - name: Build (Gradle)
         run: |
-          bash ./gradlew bootJar -x test
+          ./gradlew bootJar -x test
 
-      - name: Start app (localhost:8080)
+      - name: Start app (localhost:8080) usando Postgres do job
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/ecommerce
+          SPRING_DATASOURCE_USERNAME: postgres
+          SPRING_DATASOURCE_PASSWORD: postgres
+          SPRING_JPA_HIBERNATE_DDL_AUTO: update
+          SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.PostgreSQLDialect
         run: |
           JAR=$(ls build/libs/*.jar | head -n1)
-          nohup java -jar "$JAR" --server.port=8080 --server.address=0.0.0.0 > /tmp/app.log 2>&1 &
-          for i in {1..60}; do
-            if curl -sf http://127.0.0.1:8080/v1/products >/dev/null; then
-              echo "App OK"; break
-            fi
-            sleep 3
+          nohup java -jar "$JAR" \
+            --server.port=8080 \
+            --server.address=0.0.0.0 \
+            > /tmp/app.log 2>&1 &
+          # espera app responder (aceita 2xx/3xx/4xx/5xx; falha só se 000 = sem conexão)
+          for i in {1..90}; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/v1/products || echo 000)
+            if [ "$CODE" != "000" ]; then echo "App up (HTTP $CODE)"; break; fi
+            sleep 2
           done
 
       - name: Detect host address for Docker (host ↔ container)
@@ -60,8 +76,8 @@ jobs:
           elif docker run --rm --network bridge curlimages/curl:8.9.1 -sSf "$T2" >/dev/null; then
             echo "DAST_TARGET=$T2" >> $GITHUB_ENV
           else
-            echo "Não consegui alcançar a app a partir de um container. Verifique se está ouvindo em 0.0.0.0:8080."
-            echo "Log da app:"; tail -n 200 /tmp/app.log || true
+            echo "Não consegui alcançar a app a partir de um container."
+            echo "Últimas linhas do log da app:"; tail -n 200 /tmp/app.log || true
             exit 1
           fi
 
@@ -95,4 +111,5 @@ jobs:
             zap-full.md
             zap-full.json
             /tmp/app.log
+
 
