@@ -1,13 +1,10 @@
 name: SCA - Snyk
-
 on:
-  push:
-    branches: ["main", "CI-CD"]
-  pull_request:
-    branches: ["main"]
-  schedule:
-    - cron: "15 4 * * 4"
   workflow_dispatch:
+  push:
+    branches: [ "main", "CI-CD" ]
+  pull_request:
+    branches: [ "main" ]
 
 permissions:
   contents: read
@@ -16,38 +13,28 @@ permissions:
 jobs:
   snyk-sca:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup JDK
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Setup Snyk CLI
-        uses: snyk/actions/setup@v4   # << CORRETO
+        uses: snyk/actions/setup@v3   # use @v3 se o @v4 não resolver
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: (Opcional) Dar permissão ao gradlew
+      - name: (Opcional) dar permissão ao gradlew
         run: |
-          if [ -f gradlew ]; then
-            chmod +x ./gradlew
-            sed -i 's/\r$//' ./gradlew
-          fi
+          if [ -f gradlew ]; then chmod +x gradlew; sed -i 's/\r$//' gradlew; fi
 
-      # Gera SARIF para Code Scanning (não falha o job aqui)
-      - name: Snyk test (SARIF)
+      - name: Snyk test (gera SARIF, não falha aqui)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk test \
-            --all-projects \
-            --detection-depth=4 \
-            --severity-threshold=low \
+          snyk test --all-projects --detection-depth=4 \
             --sarif-file-output=snyk.sarif || true
 
       - name: Upload SARIF
@@ -56,41 +43,27 @@ jobs:
         with:
           sarif_file: snyk.sarif
 
-      # JSON para gate de severidade
       - name: Snyk test (JSON p/ gate)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk test \
-            --all-projects \
-            --detection-depth=4 \
-            --severity-threshold=low \
+          snyk test --all-projects --detection-depth=4 \
             --json-file-output=snyk.json || true
 
       - name: Gate por severidade (High/Critical)
         run: |
-          if ! command -v jq >/dev/null; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
+          command -v jq >/dev/null || (sudo apt-get update && sudo apt-get install -y jq)
           test -f snyk.json || { echo "snyk.json não encontrado"; exit 1; }
           HIGHS=$(jq '[.vulnerabilities[] | select(.severity=="high" or .severity=="critical")] | length' snyk.json)
           echo "High/Critical: $HIGHS"
-          if [ "$HIGHS" -gt 0 ]; then
-            echo "Falhando por vulnerabilidades High/Critical."
-            exit 1
-          fi
+          [ "$HIGHS" -gt 0 ] && exit 1 || exit 0
 
-      # Envia snapshot contínuo para a UI do Snyk (apenas na main)
-      - name: Snyk monitor (main only)
+      - name: Snyk monitor (apenas main)
         if: github.ref == 'refs/heads/main'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk monitor \
-            --all-projects \
-            --detection-depth=4 \
-            --project-environment=github-actions \
-            --project-lifecycle=production || true
-
+          snyk monitor --all-projects --detection-depth=4 \
+            --project-environment=github-actions --project-lifecycle=production || true
 
 
