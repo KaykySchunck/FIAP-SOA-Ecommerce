@@ -14,25 +14,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # >>> Permissão de execução no gradlew (e normaliza CRLF, se houver)
-      - name: Make gradlew executable
-        run: |
-          if [ -f gradlew ]; then
-            chmod +x ./gradlew
-            sed -i 's/\r$//' ./gradlew || true
-          else
-            echo "gradlew não encontrado na raiz do repo"; exit 1
-          fi
-
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
+      # Garante o Gradle CLI disponível (para gerar wrapper se faltar)
+      - name: Prepare Gradle
+        uses: gradle/gradle-build-action@v3
+
+      # Gera o wrapper se não existir e aplica permissão de execução
+      - name: Ensure Gradle wrapper + chmod
+        run: |
+          if [ ! -f ./gradlew ]; then
+            echo "gradlew não existe — gerando com 'gradle wrapper'"
+            gradle wrapper
+          fi
+          sed -i 's/\r$//' ./gradlew || true
+          chmod +x ./gradlew
+          ./gradlew --version
+
       - name: Build (Gradle)
         run: |
-          bash ./gradlew --version
           bash ./gradlew bootJar -x test
 
       - name: Start app (localhost:8080)
@@ -91,3 +95,4 @@ jobs:
             zap-full.md
             zap-full.json
             /tmp/app.log
+
