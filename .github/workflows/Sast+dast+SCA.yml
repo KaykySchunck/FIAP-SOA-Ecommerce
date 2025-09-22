@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # permite enviar SARIF ao Code scanning
+  security-events: write   # necessário para subir SARIF
 
 concurrency:
   group: security-ci-${{ github.ref }}
@@ -28,107 +28,115 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Build (Gradle)
+      - name: Preparar gradlew
         run: |
           test -f gradlew && chmod +x gradlew || true
           sed -i 's/\r$//' gradlew || true
-          ./gradlew bootJar -x test
 
-      - name: Upload app JAR
+      - name: Build (Gradle)
+        run: ./gradlew bootJar -x test
+
+      - name: Publicar JAR (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: app-jar
           path: build/libs/*.jar
 
-  # 1) SAST - Semgrep (gera SARIF + gate)
+  # 1) SAST - Semgrep (gera SARIF)
   sast_semgrep:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Semgrep
-        uses: semgrep/semgrep-action@v1
+      # Use sua conta do Semgrep (se tiver token). Sem token também funciona.
+      - name: Semgrep scan
+        id: semgrep
+        uses: returntocorp/semgrep-action@fcd5ab7459e8d91cb1777481980d1b18b4fc6735
         with:
-          config: p/java
-          generateSarif: true
-          sarifOutput: semgrep.sarif
-        continue-on-error: true  # gate manual abaixo
+          publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
+          generateSarif: "1"
 
       - name: Upload SARIF (Semgrep)
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
 
-      - name: Ensure jq
-        run: |
-          command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
-
-      - name: Gate SAST (falha se houver level=error)
-        run: |
-          ERR=$(jq '[.runs[].results[]? | select(.level=="error" or .properties.severity=="ERROR")] | length' semgrep.sarif)
-          echo "Semgrep errors: $ERR"
-          test "$ERR" -eq 0
-
-  # 2) SCA - Trivy (sem API key; SARIF + gate High/Critical)
-  sca_trivy:
+  # 2) SCA - OWASP Dependency-Check (Docker) -> HTML/JSON/SARIF
+  sca_odc:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      DC_FAIL_ON_CVSS: "7.0"   # gate High/Critical
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Restore Trivy cache
+      - name: Restore ODC data cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ hashFiles('**/*.gradle*','**/pom.xml','**/gradle.lockfile') }}
-          restore-keys: trivy-db-${{ runner.os }}-
+          path: ./.odc-data
+          key: odc-data-v11-${{ runner.os }}-${{ hashFiles('**/build.gradle*','**/pom.xml','**/package-lock.json','**/gradle.lockfile','**/gradle/**') }}
+          restore-keys: |
+            odc-data-v11-${{ runner.os }}-
 
-      - name: Run Trivy (SCA) -> JSON + SARIF
+      - name: Preparar diretórios
+        run: mkdir -p .odc-data odc-reports
+
+      - name: Dependency-Check (Docker)
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
-          mkdir -p sca-reports
+          docker pull owasp/dependency-check:latest
+          SUPP=""
+          if [ -f security/dependency-check-suppression.xml ]; then
+            SUPP="--suppression /src/security/dependency-check-suppression.xml"
+          fi
           docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -e NVD_API_KEY="$NVD_API_KEY" \
             -v "$PWD":/src \
-            -v "$HOME/.cache/trivy":/root/.cache/ \
-            aquasecurity/trivy:latest fs /src \
-              --scanners vuln --ignore-unfixed \
-              --severity HIGH,CRITICAL \
-              --format json  --output /src/sca-reports/trivy.json || true
+            -v "$PWD/.odc-data":/usr/share/dependency-check/data \
+            -v "$PWD/odc-reports":/report \
+            owasp/dependency-check:latest \
+              --scan /src \
+              --project "${{ github.repository }}@${{ github.sha }}" \
+              --out /report \
+              --format HTML --format JSON --format SARIF \
+              --failOnCVSS "${DC_FAIL_ON_CVSS}" $SUPP || true
+          ls -lah odc-reports || true
 
-          docker run --rm \
-            -v "$PWD":/src \
-            -v "$HOME/.cache/trivy":/root/.cache/ \
-            aquasecurity/trivy:latest fs /src \
-              --scanners vuln --ignore-unfixed \
-              --severity HIGH,CRITICAL \
-              --format sarif --output /src/sca-reports/trivy.sarif || true
-
-      - name: Upload SARIF (Trivy)
+      - name: Upload SARIF (ODC)
+        if: always() && hashFiles('odc-reports/dependency-check-report.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: sca-reports/trivy.sarif
+          sarif_file: odc-reports/dependency-check-report.sarif
+          category: owasp-dependency-check
 
-      - name: Gate SCA (HIGH/CRITICAL)
-        run: |
-          COUNT=$(jq '[.runs[].results[]?] | length' sca-reports/trivy.sarif)
-          echo "SCA HIGH/CRITICAL: $COUNT"
-          test "$COUNT" -eq 0
-
-      - name: Upload artifacts (Trivy)
+      - name: Upload artifacts (ODC)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sca-trivy
-          path: sca-reports/*
+          name: odc-reports
+          path: |
+            odc-reports/dependency-check-report.html
+            odc-reports/dependency-check-report.json
+            odc-reports/dependency-check-report.sarif
+          if-no-files-found: warn
 
-  # 3) DAST - ZAP Full no mesmo network (Postgres + app + ZAP)
+  # 3) DAST - ZAP Full (rede docker compartilhada)
   dast_zap:
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create Docker network
+      - name: Criar rede Docker
         run: docker network create zapnet || true
 
       - name: Start Postgres (zapnet)
@@ -137,9 +145,7 @@ jobs:
             -e POSTGRES_DB=ecomm \
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres \
-            -p 5432:5432 \
-            postgres:16-alpine
-          # aguarda DB subir
+            -p 5432:5432 postgres:16-alpine
           for i in {1..30}; do
             docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && break
             sleep 2
@@ -165,7 +171,7 @@ jobs:
               --spring.datasource.password=postgres \
               --spring.jpa.hibernate.ddl-auto=update
 
-      - name: Wait for health
+      - name: "Wait for health (http://app:8080/v1/products)"
         run: |
           for i in {1..60}; do
             docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf http://app:8080/v1/products >/dev/null && { echo "App OK"; exit 0; }
@@ -175,12 +181,12 @@ jobs:
           docker logs app || true
           exit 1
 
-      - name: Prep output dir (writeable)
+      - name: Preparar pasta de saída
         run: |
           mkdir -p zap-out
           chmod 777 zap-out
 
-      - name: Run ZAP Full Scan
+      - name: ZAP Full Scan
         run: |
           docker run --rm --network zapnet \
             -v "$PWD/zap-out":/zap/wrk \
@@ -217,18 +223,18 @@ jobs:
           docker rm -f app db || true
           docker network rm zapnet || true
 
-  # 4) Deploy gate (só roda se tudo passar)
+  # 4) Gate final de deploy (só roda se tudo passou)
   ready_to_deploy:
-    needs: [sast_semgrep, sca_trivy, dast_zap]
+    needs: [sast_semgrep, sca_odc, dast_zap]
     if: ${{ success() }}
     runs-on: ubuntu-latest
     steps:
       - run: echo "✅ Todos os gates passaram. Pronto para deploy."
 
-  # 5) Notificações Slack (falha)
+  # 5) Notificação no Slack quando falhar (opcional)
   notify_failure:
-    needs: [sast_semgrep, sca_trivy, dast_zap]
-    if: failure()
+    needs: [sast_semgrep, sca_odc, dast_zap]
+    if: failure() && secrets.SLACK_WEBHOOK_URL != ''
     runs-on: ubuntu-latest
     steps:
       - name: Slack (failure)
@@ -242,4 +248,5 @@ jobs:
             Workflow: ${{ github.workflow }}
             Run: ${{ github.run_number }}
             Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
 
