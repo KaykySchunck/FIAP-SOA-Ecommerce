@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # para subir SARIF
+  security-events: write   # permite enviar SARIF ao Code scanning
 
 concurrency:
   group: security-ci-${{ github.ref }}
@@ -47,14 +47,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # roda regras padrão de Java; gere SARIF p/ o Code Scanning
       - name: Run Semgrep
         uses: semgrep/semgrep-action@v1
         with:
           config: p/java
           generateSarif: true
           sarifOutput: semgrep.sarif
-        continue-on-error: true   # vamos fazer o gate manualmente
+        continue-on-error: true  # gate manual abaixo
 
       - name: Upload SARIF (Semgrep)
         uses: github/codeql-action/upload-sarif@v3
@@ -65,8 +64,7 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
 
-      # Gate: falha se houver findings nível "error" (equivalente a High/Critical p/ Semgrep OSS)
-      - name: Gate SAST
+      - name: Gate SAST (falha se houver level=error)
         run: |
           ERR=$(jq '[.runs[].results[]? | select(.level=="error" or .properties.severity=="ERROR")] | length' semgrep.sarif)
           echo "Semgrep errors: $ERR"
@@ -95,7 +93,7 @@ jobs:
             aquasecurity/trivy:latest fs /src \
               --scanners vuln --ignore-unfixed \
               --severity HIGH,CRITICAL \
-              --format json  --output /src/sca-reports/trivy.json   || true
+              --format json  --output /src/sca-reports/trivy.json || true
 
           docker run --rm \
             -v "$PWD":/src \
@@ -141,6 +139,7 @@ jobs:
             -e POSTGRES_PASSWORD=postgres \
             -p 5432:5432 \
             postgres:16-alpine
+          # aguarda DB subir
           for i in {1..30}; do
             docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && break
             sleep 2
@@ -152,7 +151,7 @@ jobs:
           name: app-jar
           path: appjar
 
-      - name: Start app (container name: app)
+      - name: "Start app (container name: app)"
         run: |
           JAR="$(ls appjar/*.jar | head -n1)"
           docker run -d --name app --network zapnet -p 8080:8080 \
@@ -172,7 +171,9 @@ jobs:
             docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf http://app:8080/v1/products >/dev/null && { echo "App OK"; exit 0; }
             sleep 3
           done
-          echo "App não respondeu em /v1/products"; docker logs app || true; exit 1
+          echo "App não respondeu em /v1/products"
+          docker logs app || true
+          exit 1
 
       - name: Prep output dir (writeable)
         run: |
@@ -195,7 +196,6 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
 
-      # Gate: falha se houver High
       - name: Gate DAST (High)
         run: |
           test -f zap-out/zap-full.json || { echo "zap-out/zap-full.json não encontrado"; exit 1; }
@@ -242,3 +242,4 @@ jobs:
             Workflow: ${{ github.workflow }}
             Run: ${{ github.run_number }}
             Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
