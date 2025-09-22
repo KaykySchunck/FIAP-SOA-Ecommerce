@@ -233,14 +233,16 @@ jobs:
   # 5) Notificação no Slack quando falhar
   notify_failure:
     needs: [sast_semgrep, sca_odc, dast_zap]
-    if: ${{ failure() }}   # <- só condição de falha aqui
+    if: ${{ failure() }}          # só dispara quando o workflow falha
     runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}   # <- mapeia secret para env do job
     steps:
       - name: Slack (failure)
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}   # <- checagem do secret no STEP
+        if: ${{ env.SLACK_WEBHOOK != '' }}              # <- usa env no if (permitido)
         uses: rtCamp/action-slack-notify@v2
         env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK: ${{ env.SLACK_WEBHOOK }}
           SLACK_COLOR: '#D2222D'
           SLACK_TITLE: "❌ Security CI falhou"
           SLACK_MESSAGE: |
