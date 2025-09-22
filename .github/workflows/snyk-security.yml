@@ -28,18 +28,18 @@ jobs:
           java-version: "21"
 
       - name: Setup Snyk CLI
-        uses: snyk/actions/setup@v4
+        uses: snyk/actions/setup@v4   # << CORRETO
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: Make gradlew executable (if present)
+      - name: (Opcional) Dar permissão ao gradlew
         run: |
           if [ -f gradlew ]; then
             chmod +x ./gradlew
             sed -i 's/\r$//' ./gradlew
           fi
 
-      # Gera SARIF p/ Code Scanning (falhas só no gate abaixo)
+      # Gera SARIF para Code Scanning (não falha o job aqui)
       - name: Snyk test (SARIF)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -47,10 +47,16 @@ jobs:
           snyk test \
             --all-projects \
             --detection-depth=4 \
-            --severity-threshold=high \
+            --severity-threshold=low \
             --sarif-file-output=snyk.sarif || true
 
-      # Gera JSON pra gate de severidade
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk.sarif
+
+      # JSON para gate de severidade
       - name: Snyk test (JSON p/ gate)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -61,36 +67,30 @@ jobs:
             --severity-threshold=low \
             --json-file-output=snyk.json || true
 
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: snyk.sarif
-
-      - name: Ensure jq
+      - name: Gate por severidade (High/Critical)
         run: |
           if ! command -v jq >/dev/null; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
-
-      - name: Gate por severidade (High/Critical)
-        run: |
           test -f snyk.json || { echo "snyk.json não encontrado"; exit 1; }
           HIGHS=$(jq '[.vulnerabilities[] | select(.severity=="high" or .severity=="critical")] | length' snyk.json)
           echo "High/Critical: $HIGHS"
           if [ "$HIGHS" -gt 0 ]; then
-            echo "Falhando por High/Critical."
+            echo "Falhando por vulnerabilidades High/Critical."
             exit 1
           fi
 
-      # Snapshot na UI do Snyk (somente main)
+      # Envia snapshot contínuo para a UI do Snyk (apenas na main)
       - name: Snyk monitor (main only)
         if: github.ref == 'refs/heads/main'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk monitor --all-projects --detection-depth=4 \
+          snyk monitor \
+            --all-projects \
+            --detection-depth=4 \
             --project-environment=github-actions \
             --project-lifecycle=production || true
+
 
 
