@@ -5,65 +5,59 @@ on:
     branches: [ "main", "CI-CD" ]
   pull_request:
     branches: [ "main" ]
-
 permissions:
   contents: read
   security-events: write
-
 jobs:
   snyk-sca:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-
       - name: Setup Snyk CLI
-        uses: snyk/actions/setup@v3   # use @v3 se o @v4 não resolver
+        uses: snyk/actions/setup@v4
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-
       - name: (Opcional) dar permissão ao gradlew
         run: |
           if [ -f gradlew ]; then chmod +x gradlew; sed -i 's/\r$//' gradlew; fi
-
       - name: Snyk test (gera SARIF, não falha aqui)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           snyk test --all-projects --detection-depth=4 \
-            --sarif-file-output=snyk.sarif || true
-
+            --sarif-file-output=snyk.sarif --debug || true
+      - name: Verificar SARIF
+        run: |
+          test -f snyk.sarif || { echo "snyk.sarif não encontrado"; exit 1; }
       - name: Upload SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk.sarif
-
       - name: Snyk test (JSON p/ gate)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           snyk test --all-projects --detection-depth=4 \
-            --json-file-output=snyk.json || true
-
+            --json-file-output=snyk.json --debug || true
       - name: Gate por severidade (High/Critical)
         run: |
           command -v jq >/dev/null || (sudo apt-get update && sudo apt-get install -y jq)
           test -f snyk.json || { echo "snyk.json não encontrado"; exit 1; }
-          HIGHS=$(jq '[.vulnerabilities[] | select(.severity=="high" or .severity=="critical")] | length' snyk.json)
+          cat snyk.json # Para depuração
+          HIGHS=$(jq '[.[] | select(.vulnerabilities != null) | .vulnerabilities[] | select(.severity=="high" or .severity=="critical")] | length' snyk.json || echo "Erro ao processar JSON")
           echo "High/Critical: $HIGHS"
-          [ "$HIGHS" -gt 0 ] && exit 1 || exit 0
-
+          [ "$HIGHS" -gt 0 ] && { echo "Falha: Encontradas $HIGHS vulnerabilidades high/critical"; exit 1; } || exit 0
       - name: Snyk monitor (apenas main)
-        if: github.ref == 'refs/heads/main'
+        if: github.ref_name == 'main'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           snyk monitor --all-projects --detection-depth=4 \
-            --project-environment=github-actions --project-lifecycle=production || true
+            --project-environment=github-actions --project-lifecycle=production --debug || true
 
 
