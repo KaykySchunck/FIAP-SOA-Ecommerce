@@ -1,4 +1,4 @@
-name: DAST - ZAP Full
+name: DAST - ZAP Full (docker-net)
 
 on:
   workflow_dispatch:
@@ -7,32 +7,20 @@ permissions:
   contents: read
 
 jobs:
-  zap_full_local:
+  zap_full:
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ecommerce
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd="pg_isready -U postgres -d ecommerce"
-          --health-interval=5s --health-timeout=5s --health-retries=10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup JDK
+      - name: Setup JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Prepare Gradle
+      - name: Gradle cache
         uses: gradle/gradle-build-action@v3
 
       - name: Ensure Gradle wrapper + chmod
@@ -42,66 +30,63 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --version
 
-      - name: Build (Gradle)
-        run: |
-          ./gradlew bootJar -x test
+      - name: Build JAR
+        run: ./gradlew bootJar -x test
 
-      - name: Start app (localhost:8080) usando Postgres do job
-        env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/ecommerce
-          SPRING_DATASOURCE_USERNAME: postgres
-          SPRING_DATASOURCE_PASSWORD: postgres
-          SPRING_JPA_HIBERNATE_DDL_AUTO: update
-          SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.PostgreSQLDialect
+      - name: Create docker network
+        run: docker network create zapnet
+
+      - name: Start Postgres (zapnet)
         run: |
-          JAR=$(ls build/libs/*.jar | head -n1)
-          nohup java -jar "$JAR" \
-            --server.port=8080 \
-            --server.address=0.0.0.0 \
-            > /tmp/app.log 2>&1 &
-          # espera app responder (aceita 2xx/3xx/4xx/5xx; falha só se 000 = sem conexão)
-          for i in {1..90}; do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/v1/products || echo 000)
-            if [ "$CODE" != "000" ]; then echo "App up (HTTP $CODE)"; break; fi
-            sleep 2
+          docker run -d --name ecommerce_db --network zapnet \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=ecommerce \
+            postgres:16
+          # aguarda DB ficar pronto
+          for i in {1..30}; do
+            docker run --rm --network zapnet postgres:16 \
+              pg_isready -h ecommerce_db -U postgres -d ecommerce && break || sleep 2
           done
 
-      - name: Detect host address for Docker (host ↔ container)
+      - name: Start app container (zapnet)
         run: |
-          set -e
-          T1="http://host.docker.internal:8080/v1/products"
-          T2="http://172.17.0.1:8080/v1/products"
-          if docker run --rm --network bridge curlimages/curl:8.9.1 -sSf "$T1" >/dev/null; then
-            echo "DAST_TARGET=$T1" >> $GITHUB_ENV
-          elif docker run --rm --network bridge curlimages/curl:8.9.1 -sSf "$T2" >/dev/null; then
-            echo "DAST_TARGET=$T2" >> $GITHUB_ENV
-          else
-            echo "Não consegui alcançar a app a partir de um container."
-            echo "Últimas linhas do log da app:"; tail -n 200 /tmp/app.log || true
-            exit 1
-          fi
+          JAR=$(ls build/libs/*.jar | head -n1)
+          docker run -d --name app --network zapnet \
+            -e SPRING_DATASOURCE_URL=jdbc:postgresql://ecommerce_db:5432/ecommerce \
+            -e SPRING_DATASOURCE_USERNAME=postgres \
+            -e SPRING_DATASOURCE_PASSWORD=postgres \
+            -e SPRING_JPA_HIBERNATE_DDL_AUTO=update \
+            -v "$PWD/build/libs":/app:ro \
+            eclipse-temurin:21-jre \
+            java -jar /app/$(basename "$JAR") \
+              --server.port=8080 --server.address=0.0.0.0
+          # aguarda API responder (qualquer HTTP != 000)
+          for i in {1..60}; do
+            CODE=$(docker run --rm --network zapnet curlimages/curl:8.9.1 -s -o /dev/null -w "%{http_code}" http://app:8080/v1/products || echo 000)
+            [ "$CODE" != "000" ] && echo "App up (HTTP $CODE)" && break || sleep 2
+          done
 
-      - name: ZAP Full Scan (contra localhost)
-        uses: zaproxy/action-full-scan@v0.12.0
-        with:
-          target: ${{ env.DAST_TARGET }}
-          cmd_options: >-
-            -a
-            -m 5
-            -r zap-full.html
-            -w zap-full.md
-            -J zap-full.json
-          allow_issue_writing: false
-          artifact_name: zap_full_local
+      - name: Run ZAP Full Scan (same docker network)
+        run: |
+          docker run --rm --network zapnet -v "$PWD":/zap/wrk ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py \
+              -t http://app:8080/v1/products \
+              -r /zap/wrk/zap-full.html \
+              -w /zap/wrk/zap-full.md \
+              -J /zap/wrk/zap-full.json \
+              -a -m 5
 
       - name: Gate por severidade (High)
         run: |
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y jq >/dev/null 2>&1 || true
           test -f zap-full.json || { echo "zap-full.json não encontrado"; exit 1; }
           HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-full.json)
           echo "High findings: $HIGHS"
           if [ "$HIGHS" -gt 0 ]; then exit 1; fi
 
-      - name: Upload reports + app log
+      - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -110,6 +95,13 @@ jobs:
             zap-full.html
             zap-full.md
             zap-full.json
-            /tmp/app.log
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "---- app logs (últimas 200 linhas) ----" || true
+          docker logs app --tail 200 || true
+          docker rm -f app ecommerce_db || true
+          docker network rm zapnet || true
 
 
