@@ -9,7 +9,6 @@ permissions:
 jobs:
   dast_zap:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,29 +17,31 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
 
       - name: Make gradlew executable (fix CRLF)
+        shell: bash
         run: |
           test -f gradlew || { echo "gradlew não encontrado"; exit 1; }
           chmod +x ./gradlew
           sed -i 's/\r$//' ./gradlew
 
-      - name: Build fat JAR (sem testes)
+      - name: Build fat JAR (no tests)
+        shell: bash
         run: ./gradlew bootJar -x test
 
       - name: Create Docker network
+        shell: bash
         run: docker network create zapnet || true
 
       - name: Start Postgres (zapnet)
+        shell: bash
         run: |
           docker run -d --name db --network zapnet \
             -e POSTGRES_DB=ecomm \
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres \
-            -p 5432:5432 \
-            postgres:16-alpine
-          # aguarda DB ficar healthy
+            -p 5432:5432 postgres:16-alpine
           for i in {1..60}; do
             docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && { echo "DB OK"; exit 0; }
             echo "aguardando DB... ($i)"; sleep 2
@@ -48,12 +49,12 @@ jobs:
           echo "DB não respondeu"; exit 1
 
       - name: Start app (container: app)
+        shell: bash
         run: |
           JAR="$(ls build/libs/*.jar | head -n1)"
           echo "Usando JAR: $JAR"
           docker run -d --name app --network zapnet -p 8080:8080 \
-            -v "$PWD":/work -w /work \
-            openjdk:21-jdk \
+            -v "$PWD":/work -w /work openjdk:21-jdk \
             sh -lc "java -jar \"$JAR\" \
               --server.port=8080 \
               --server.address=0.0.0.0 \
@@ -62,26 +63,27 @@ jobs:
               --spring.datasource.password=postgres \
               --spring.jpa.hibernate.ddl-auto=update"
 
-      - name: Wait for health (http://app:8080/vuln/echo?q=ping)
+      - name: Wait for health (/vuln/echo)
+        shell: bash
         run: |
           for i in {1..90}; do
             docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf \
-              "http://app:8080/vuln/echo?q=ping" >/dev/null \
-              && { echo "App OK"; exit 0; }
+              "http://app:8080/vuln/echo?q=ping" >/dev/null && { echo "App OK"; exit 0; }
             echo "aguardando app... ($i)"; sleep 2
           done
           echo "App não respondeu"; docker logs app || true; exit 1
 
       - name: Prep output dir
+        shell: bash
         run: |
           mkdir -p zap-out
           chmod 777 zap-out
 
-      - name: Run ZAP Full Scan (target = /vuln/echo)
+      - name: Run ZAP Full Scan (target=/vuln/echo)
+        shell: bash
         run: |
           docker run --rm --network zapnet \
-            -v "$PWD/zap-out":/zap/wrk \
-            ghcr.io/zaproxy/zaproxy:stable \
+            -v "$PWD/zap-out":/zap/wrk ghcr.io/zaproxy/zaproxy:stable \
             zap-full-scan.py \
               -t "http://app:8080/vuln/echo?q=test" \
               -r /zap/wrk/zap-full.html \
@@ -89,17 +91,18 @@ jobs:
               -J /zap/wrk/zap-full.json \
               -x /zap/wrk/zap-full.xml \
               -a -m 5 \
-              -z "-config api.addrs.addr.name=.* -config api.addrs.addr.regex=true" \
-            || true
+              -z "-config api.addrs.addr.name=.* -config api.addrs.addr.regex=true" || true
 
       - name: Ensure jq
+        shell: bash
         run: |
           command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
 
       - name: Gate por severidade (High/Critical)
+        shell: bash
         run: |
           test -f zap-out/zap-full.json || { echo "zap-out/zap-full.json não encontrado"; exit 1; }
-          HIGHS=$(jq '[.site[]?.alerts[]? | select(.risk=="High" or .risk=="Critical" or (.riskdesc|test("^High|^Critical")))] | length' zap-out/zap-full.json)
+          HIGHS=$(jq '[.site[]?.alerts[]? | select(.risk=="High" or .risk=="Critical" or (.riskdesc|test("^(High|Critical)")))] | length' zap-out/zap-full.json)
           echo "High/Critical findings: $HIGHS"
           if [ "$HIGHS" -gt 0 ]; then
             echo "❌ Falhando pipeline por findings High/Critical."
@@ -120,9 +123,9 @@ jobs:
 
       - name: Cleanup
         if: always()
+        shell: bash
         run: |
           echo "---- app logs (últimos 20min) ----"
           docker logs app --since 20m || true
           docker rm -f app db || true
           docker network rm zapnet || true
-
