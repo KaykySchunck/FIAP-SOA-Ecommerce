@@ -21,5 +21,6 @@ class VulnController {
         val payload = q ?: ""
         // Retorna HTML sem qualquer escape -> XSS refletido
         return "<html><body><h3>Echo</h3><div>$payload</div></body></html>"
+        // Teste de vulnerabilidade
     }
 }
