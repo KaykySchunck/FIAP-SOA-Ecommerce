@@ -14,19 +14,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup JDK
+      - name: Setup JDK 21 (build)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Make gradlew executable (and fix CRLF if any)
+      - name: Make gradlew executable (fix CRLF)
         run: |
           test -f gradlew || { echo "gradlew não encontrado"; exit 1; }
           chmod +x ./gradlew
           sed -i 's/\r$//' ./gradlew
 
-      - name: Build (Gradle)
+      - name: Build fat JAR (sem testes)
         run: ./gradlew bootJar -x test
 
       - name: Create Docker network
@@ -40,70 +40,72 @@ jobs:
             -e POSTGRES_PASSWORD=postgres \
             -p 5432:5432 \
             postgres:16-alpine
-          # Espera DB ficar pronto
-          for i in {1..30}; do
-            docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && break
-            sleep 2
+          # aguarda DB ficar healthy
+          for i in {1..60}; do
+            docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && { echo "DB OK"; exit 0; }
+            echo "aguardando DB... ($i)"; sleep 2
           done
+          echo "DB não respondeu"; exit 1
 
-      - name: "Start app (container name: app)"
+      - name: Start app (container: app)
         run: |
           JAR="$(ls build/libs/*.jar | head -n1)"
           echo "Usando JAR: $JAR"
           docker run -d --name app --network zapnet -p 8080:8080 \
             -v "$PWD":/work -w /work \
             openjdk:21-jdk \
-            java -jar "$JAR" \
+            sh -lc "java -jar \"$JAR\" \
               --server.port=8080 \
               --server.address=0.0.0.0 \
               --spring.datasource.url=jdbc:postgresql://db:5432/ecomm \
               --spring.datasource.username=postgres \
               --spring.datasource.password=postgres \
-              --spring.jpa.hibernate.ddl-auto=update
+              --spring.jpa.hibernate.ddl-auto=update"
 
-      - name: Wait for health (http://app:8080/v1/products)
+      - name: Wait for health (http://app:8080/vuln/echo?q=ping)
         run: |
-          for i in {1..60}; do
-            docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf http://localhost:8080/v1/products >/dev/null && { echo "App OK"; exit 0; }
-            sleep 3
+          for i in {1..90}; do
+            docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf \
+              "http://app:8080/vuln/echo?q=ping" >/dev/null \
+              && { echo "App OK"; exit 0; }
+            echo "aguardando app... ($i)"; sleep 2
           done
-          echo "App não respondeu em /v1/products"
-          docker logs app || true
-          exit 1
+          echo "App não respondeu"; docker logs app || true; exit 1
 
-      - name: Prep output dir (writeable)
+      - name: Prep output dir
         run: |
           mkdir -p zap-out
           chmod 777 zap-out
 
-      - name: Run ZAP Full Scan (same docker network)
+      - name: Run ZAP Full Scan (target = /vuln/echo)
         run: |
-          # Não falhe aqui; deixe o gate decidir
           docker run --rm --network zapnet \
             -v "$PWD/zap-out":/zap/wrk \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-full-scan.py \
-              -t http://app:8080/v1/products \
+              -t "http://app:8080/vuln/echo?q=test" \
               -r /zap/wrk/zap-full.html \
               -w /zap/wrk/zap-full.md \
               -J /zap/wrk/zap-full.json \
-              -a -m 5 || true
+              -x /zap/wrk/zap-full.xml \
+              -a -m 5 \
+              -z "-config api.addrs.addr.name=.* -config api.addrs.addr.regex=true" \
+            || true
 
-      - name: Ensure jq is available
+      - name: Ensure jq
         run: |
-          if ! command -v jq >/dev/null; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
+          command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
 
-      - name: Gate por severidade (High)
+      - name: Gate por severidade (High/Critical)
         run: |
           test -f zap-out/zap-full.json || { echo "zap-out/zap-full.json não encontrado"; exit 1; }
-          HIGHS=$(jq '[.site[].alerts[] | select(.riskdesc|test("^High"))] | length' zap-out/zap-full.json)
-          echo "High findings: $HIGHS"
+          HIGHS=$(jq '[.site[]?.alerts[]? | select(.risk=="High" or .risk=="Critical" or (.riskdesc|test("^High|^Critical")))] | length' zap-out/zap-full.json)
+          echo "High/Critical findings: $HIGHS"
           if [ "$HIGHS" -gt 0 ]; then
-            echo "Falhando pipeline por findings High."
+            echo "❌ Falhando pipeline por findings High/Critical."
             exit 1
           fi
+          echo "✅ Sem High/Critical."
 
       - name: Upload reports
         if: always()
@@ -114,11 +116,14 @@ jobs:
             zap-out/zap-full.html
             zap-out/zap-full.md
             zap-out/zap-full.json
+            zap-out/zap-full.xml
 
       - name: Cleanup
         if: always()
         run: |
-          docker logs app --since 30m || true
+          echo "---- app logs (últimos 20min) ----"
+          docker logs app --since 20m || true
           docker rm -f app db || true
           docker network rm zapnet || true
+
 
