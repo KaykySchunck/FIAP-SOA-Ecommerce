@@ -2,6 +2,8 @@ name: DAST - ZAP Full (same docker network)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main" ]
 
 permissions:
   contents: read
@@ -26,7 +28,7 @@ jobs:
           chmod +x ./gradlew
           sed -i 's/\r$//' ./gradlew
 
-      - name: Build fat JAR (no tests)
+      - name: Build bootJar (no tests)
         shell: bash
         run: ./gradlew bootJar -x test
 
@@ -34,34 +36,48 @@ jobs:
         shell: bash
         run: docker network create zapnet || true
 
-      - name: Start Postgres (zapnet)
+      - name: Start Postgres (zapnet, DB=ecommerce)
         shell: bash
         run: |
           docker run -d --name db --network zapnet \
-            -e POSTGRES_DB=ecomm \
+            -e POSTGRES_DB=ecommerce \
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres \
             -p 5432:5432 postgres:16-alpine
           for i in {1..60}; do
-            docker exec db pg_isready -U postgres -d ecomm -h 127.0.0.1 -p 5432 && { echo "DB OK"; exit 0; }
+            docker exec db pg_isready -U postgres -d ecommerce -h 127.0.0.1 -p 5432 && { echo "DB OK"; exit 0; }
             echo "aguardando DB... ($i)"; sleep 2
           done
           echo "DB não respondeu"; exit 1
 
-      - name: Start app (container app)
+      - name: Start app (container: app)
         shell: bash
         run: |
-          JAR="$(ls build/libs/*.jar | head -n1)"
+          echo "JARs em build/libs:"
+          ls -lah build/libs || true
+
+          # pega o boot jar (ignora -plain.jar)
+          JAR="$(ls build/libs/*.jar 2>/dev/null | grep -v 'plain\.jar' | head -n1)"
+          if [ -z "$JAR" ]; then
+            echo "Boot JAR não encontrado em build/libs"; exit 1
+          fi
           echo "Usando JAR: $JAR"
+
           docker run -d --name app --network zapnet -p 8080:8080 \
             -v "$PWD":/work -w /work openjdk:21-jdk \
             sh -lc "java -jar \"$JAR\" \
               --server.port=8080 \
               --server.address=0.0.0.0 \
-              --spring.datasource.url=jdbc:postgresql://db:5432/ecomm \
+              --spring.datasource.url=jdbc:postgresql://db:5432/ecommerce \
               --spring.datasource.username=postgres \
               --spring.datasource.password=postgres \
               --spring.jpa.hibernate.ddl-auto=update"
+
+      - name: Debug containers (ps + logs iniciais)
+        shell: bash
+        run: |
+          docker ps -a
+          docker logs app --tail=200 || true
 
       - name: Wait for health (/vuln/echo)
         shell: bash
@@ -125,7 +141,6 @@ jobs:
         if: always()
         shell: bash
         run: |
-          echo "---- app logs (últimos 20min) ----"
           docker logs app --since 20m || true
           docker rm -f app db || true
           docker network rm zapnet || true
