@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+<<<<<<< HEAD
   <component name="DatabaseMigrationSettings" lastSelectedDirectory="src\main\resources\db\migration" />
+=======
+>>>>>>> cf0a818 (Atualizaçcao de pasta vuln - Vulnerabilidade Intencional)
   <component name="PersistenceUnitSettings">
     <persistence-units>
       <persistence-unit name="Default" defaultSearchScope="Project">

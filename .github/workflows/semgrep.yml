@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # This workflow uses actions that are not certified by GitHub.
 # They are provided by a third-party and are governed by
 # separate terms of service, privacy policy, and support
@@ -8,10 +9,13 @@
 #
 # See https://semgrep.dev/docs
 
+=======
+>>>>>>> cf0a818 (Atualizaçcao de pasta vuln - Vulnerabilidade Intencional)
 name: Semgrep
 
 on:
   push:
+<<<<<<< HEAD
     branches: [ "main", "CI-CD" ]
   pull_request:
     # The branches below must be a subset of the branches above
@@ -46,7 +50,40 @@ jobs:
       # Upload SARIF file generated in previous step (mesmo se o gate falhar)
       - name: Upload SARIF file
         if: always()
+=======
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  semgrep:
+    name: Run Semgrep with auto-config
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Instalar Semgrep
+        run: pip install semgrep
+
+      - name: Rodar Semgrep com auto-config e saída SARIF
+        run: semgrep scan --config=auto --sarif --output=semgrep.sarif
+
+      - name: Upload do resultado SARIF
+>>>>>>> cf0a818 (Atualizaçcao de pasta vuln - Vulnerabilidade Intencional)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
 
+<<<<<<< HEAD
+=======
+
+
+
+>>>>>>> cf0a818 (Atualizaçcao de pasta vuln - Vulnerabilidade Intencional)

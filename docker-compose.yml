@@ -3,12 +3,21 @@ services:
     container_name: ecommerce_db
     image: postgres:16.3
     ports:
+<<<<<<< HEAD
       - "5432:5432"
     networks:
       - ecommerce
     environment:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_USER=postgres
+=======
+      - "5433:5432"
+    networks:
+      - ecommerce
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+>>>>>>> cf0a818 (Atualizaçcao de pasta vuln - Vulnerabilidade Intencional)
       - POSTGRES_DB=ecommerce
 
 networks:

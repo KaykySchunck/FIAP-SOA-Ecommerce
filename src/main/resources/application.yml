@@ -2,7 +2,11 @@ spring:
   application:
     name: ECommerce
   datasource:
+<<<<<<< HEAD
     url: jdbc:postgresql://localhost:5432/ecommerce
+=======
+    url: jdbc:postgresql://localhost:5433/ecommerce
+>>>>>>> cf0a818 (Atualizaçcao de pasta vuln - Vulnerabilidade Intencional)
     username: postgres
     password: postgres
     driver-class-name: org.postgresql.Driver
