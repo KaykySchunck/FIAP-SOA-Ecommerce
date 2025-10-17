@@ -11,6 +11,7 @@ permissions:
 jobs:
   dast_zap:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,8 +45,6 @@ jobs:
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres \
             -p 5432:5432 postgres:16-alpine
-
-          # aguarda DB ficar pronto
           for i in {1..60}; do
             docker exec db pg_isready -U postgres -d ecommerce -h 127.0.0.1 -p 5432 && { echo "DB OK"; exit 0; }
             echo "aguardando DB... ($i)"; sleep 2
@@ -56,7 +55,6 @@ jobs:
         shell: bash
         run: |
           echo "JARs em build/libs:"; ls -lah build/libs || true
-
           # pega o boot jar (ignora -plain.jar)
           JAR="$(ls build/libs/*.jar 2>/dev/null | grep -v 'plain\.jar' | head -n1)"
           if [ -z "$JAR" ]; then
@@ -65,14 +63,14 @@ jobs:
           echo "Usando JAR: $JAR"
 
           docker run -d --name app --network zapnet -p 8080:8080 \
+            -e SERVER_PORT=8080 \
+            -e SERVER_ADDRESS=0.0.0.0 \
+            -e SPRING_DATASOURCE_URL=jdbc:postgresql://db:5432/ecommerce \
+            -e SPRING_DATASOURCE_USERNAME=postgres \
+            -e SPRING_DATASOURCE_PASSWORD=postgres \
+            -e SPRING_JPA_HIBERNATE_DDL_AUTO=update \
             -v "$PWD":/work -w /work openjdk:21-jdk \
-            sh -lc "java -jar \"$JAR\" \
-              --server.port=8080 \
-              --server.address=0.0.0.0 \
-              --spring.datasource.url=jdbc:postgresql://db:5432/ecommerce \
-              --spring.datasource.username=postgres \
-              --spring.datasource.password=postgres \
-              --spring.jpa.hibernate.ddl-auto=update"
+            sh -lc 'java $JAVA_OPTS -jar "'"$JAR"'"'
 
       - name: Verify app container is up (fail fast)
         shell: bash
@@ -85,20 +83,30 @@ jobs:
             exit 1
           fi
 
-      - name: Wait for health (/vuln/echo via container IP)
+      - name: Wait for readiness (Tomcat log or /vuln/echo)
         shell: bash
         run: |
-          APP_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' app)
-          echo "APP_IP=$APP_IP"
-          if [ -z "$APP_IP" ]; then
-            echo "❌ app sem IP na rede"; docker logs app || true; exit 1
-          fi
-          for i in {1..120}; do   # até ~6 minutos
-            docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf \
-              "http://$APP_IP:8080/vuln/echo?q=ping" >/dev/null && { echo "✅ App OK"; exit 0; }
-            echo "aguardando app... ($i)"; sleep 3
+          # tenta detectar o log do Tomcat "started on port"
+          for i in {1..90}; do
+            if docker logs app 2>&1 | grep -qE "Tomcat.*started on port 8080"; then
+              echo "✅ Tomcat started"; READY=1; break; fi
+            echo "aguardando Tomcat... ($i)"; sleep 2
           done
-          echo "❌ App não respondeu"; docker logs app || true; exit 1
+          # se não viu o log, faz health via IP
+          if [ -z "$READY" ]; then
+            APP_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' app)
+            echo "APP_IP=$APP_IP"
+            [ -n "$APP_IP" ] || { echo "❌ app sem IP"; docker logs app || true; exit 1; }
+            for i in {1..60}; do
+              docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf \
+                "http://$APP_IP:8080/vuln/echo?q=ping" >/dev/null && { echo "✅ App OK por health"; break; }
+              echo "aguardando health... ($i)"; sleep 3
+            done
+          fi
+          # verificação final
+          docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf \
+            "http://app:8080/vuln/echo?q=ready" >/dev/null \
+            || { echo "❌ App não respondeu ao health"; docker logs app || true; exit 1; }
 
       - name: Prep output dir
         shell: bash
@@ -155,4 +163,3 @@ jobs:
           docker logs app --since 20m || true
           docker rm -f app db || true
           docker network rm zapnet || true
-
