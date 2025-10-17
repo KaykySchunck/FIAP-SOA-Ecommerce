@@ -48,7 +48,7 @@ jobs:
           done
           echo "DB não respondeu"; exit 1
 
-      - name: Start app (container: app)
+      - name: Start app (container app)
         shell: bash
         run: |
           JAR="$(ls build/libs/*.jar | head -n1)"
