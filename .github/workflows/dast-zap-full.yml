@@ -44,6 +44,8 @@ jobs:
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres \
             -p 5432:5432 postgres:16-alpine
+
+          # aguarda DB ficar pronto
           for i in {1..60}; do
             docker exec db pg_isready -U postgres -d ecommerce -h 127.0.0.1 -p 5432 && { echo "DB OK"; exit 0; }
             echo "aguardando DB... ($i)"; sleep 2
@@ -53,8 +55,7 @@ jobs:
       - name: Start app (container:app)
         shell: bash
         run: |
-          echo "JARs em build/libs:"
-          ls -lah build/libs || true
+          echo "JARs em build/libs:"; ls -lah build/libs || true
 
           # pega o boot jar (ignora -plain.jar)
           JAR="$(ls build/libs/*.jar 2>/dev/null | grep -v 'plain\.jar' | head -n1)"
@@ -73,21 +74,31 @@ jobs:
               --spring.datasource.password=postgres \
               --spring.jpa.hibernate.ddl-auto=update"
 
-      - name: Debug containers (ps + logs iniciais)
+      - name: Verify app container is up (fail fast)
         shell: bash
         run: |
+          echo "---- docker ps -a ----"
           docker ps -a
-          docker logs app --tail=200 || true
+          if [ "$(docker inspect -f '{{.State.Running}}' app 2>/dev/null)" != "true" ]; then
+            echo "❌ app container NÃO está rodando. Logs:"
+            docker logs app || true
+            exit 1
+          fi
 
-      - name: Wait for health (/vuln/echo)
+      - name: Wait for health (/vuln/echo via container IP)
         shell: bash
         run: |
-          for i in {1..90}; do
+          APP_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' app)
+          echo "APP_IP=$APP_IP"
+          if [ -z "$APP_IP" ]; then
+            echo "❌ app sem IP na rede"; docker logs app || true; exit 1
+          fi
+          for i in {1..120}; do   # até ~6 minutos
             docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf \
-              "http://app:8080/vuln/echo?q=ping" >/dev/null && { echo "App OK"; exit 0; }
-            echo "aguardando app... ($i)"; sleep 2
+              "http://$APP_IP:8080/vuln/echo?q=ping" >/dev/null && { echo "✅ App OK"; exit 0; }
+            echo "aguardando app... ($i)"; sleep 3
           done
-          echo "App não respondeu"; docker logs app || true; exit 1
+          echo "❌ App não respondeu"; docker logs app || true; exit 1
 
       - name: Prep output dir
         shell: bash
@@ -144,3 +155,4 @@ jobs:
           docker logs app --since 20m || true
           docker rm -f app db || true
           docker network rm zapnet || true
+
