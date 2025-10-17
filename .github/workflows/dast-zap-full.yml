@@ -64,7 +64,7 @@ jobs:
       - name: Wait for health (http://app:8080/v1/products)
         run: |
           for i in {1..60}; do
-            docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf http://app:8080/v1/products >/dev/null && { echo "App OK"; exit 0; }
+            docker run --rm --network zapnet curlimages/curl:8.9.1 -sSf http://localhost:8080/v1/products >/dev/null && { echo "App OK"; exit 0; }
             sleep 3
           done
           echo "App não respondeu em /v1/products"
