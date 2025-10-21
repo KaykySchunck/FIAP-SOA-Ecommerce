@@ -1,0 +1,85 @@
+name: LGPD Compliance (policy-as-code + tests)
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "feature/**", "fix/**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # para publicar SARIF no Code Scanning
+
+concurrency:
+  group: lgpd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "21"
+
+jobs:
+  lgpd_tests_and_checks:
+    name: LGPD tests + coverage + policy checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Prepare Gradle
+        run: |
+          test -f gradlew && chmod +x gradlew || true
+          sed -i 's/\r$//' gradlew || true
+
+      # 1) Testes LGPD (unit/integration) + cobertura
+      - name: Run tests (JUnit/Kotlin) + JaCoCo
+        env:
+          # chave dummy só para CI; em produção usar secret/var de ambiente
+          LGPD_CRYPTO_KEY: "00000000000000000000000000000000"
+        run: ./gradlew clean test jacocoTestReport --info
+
+      - name: Upload test & coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgpd-tests-and-coverage
+          path: |
+            **/build/reports/tests/**/*
+            **/build/reports/jacoco/test/html/**/*
+          if-no-files-found: ignore
+
+      # 2) Policy-as-code LGPD com Semgrep (gate)
+      - name: Install Semgrep
+        run: pipx install semgrep
+
+      - name: Run Semgrep LGPD policy (gate on ERROR)
+        run: |
+          CONFIGS="--config p/kotlin --config p/java"
+          # regras locais (crie security/semgrep-lgpd.yml)
+          if [ -f security/semgrep-lgpd.yml ]; then
+            CONFIGS="$CONFIGS --config security/semgrep-lgpd.yml"
+          fi
+          semgrep $CONFIGS --severity=ERROR --error --sarif --output semgrep-lgpd.sarif
+
+      - name: Upload SARIF (LGPD Policy)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-lgpd.sarif
+          category: lgpd-policy
+
+  # (Opcional) Verificação rápida de presença de endpoints DSR/consent
+  openapi_presence:
+    name: Check presence of DSR/Consent endpoints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify expected endpoints in code
+        run: |
+          egrep -R "(RequestMapping|GetMapping|PostMapping|DeleteMapping).*(/privacy/consents|/privacy/dsr/(export|delete))" -n src || \
+            { echo "❌ Endpoints DSR/consent não encontrados"; exit 1; }
