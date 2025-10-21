@@ -1,0 +1,24 @@
+detekt_scan:
+  name: Static Analysis (Detekt Kotlin)
+  runs-on: ubuntu-latest
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Run Detekt
+      run: |
+        chmod +x gradlew
+        ./gradlew detekt --info
+
+    - name: Upload Detekt Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: detekt-report
+        path: build/reports/detekt/
+        if-no-files-found: ignore
